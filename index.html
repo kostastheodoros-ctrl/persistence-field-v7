@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Persistence Field v7 — Strong Interaction</title>
+<style>
+  :root{
+    --bg0:#02040a;
+    --bg1:#050914;
+    --bg2:#0a1120;
+    --ink:#d8ecff;
+    --panel:rgba(4,10,18,.54);
+    --panelBorder:rgba(140,190,255,.16);
+  }
+  html,body{
+    margin:0;
+    height:100%;
+    overflow:hidden;
+    background: radial-gradient(1200px 800px at 50% 45%, #0b1220 0%, #060b14 42%, #02040a 100%);
+    color:var(--ink);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  #wrap{ position:fixed; inset:0; }
+  canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #hud{
+    position:absolute; left:14px; top:14px; z-index:10;
+    background:var(--panel);
+    border:1px solid var(--panelBorder);
+    backdrop-filter: blur(10px);
+    border-radius:14px;
+    padding:10px 12px;
+    min-width:220px;
+    box-shadow: 0 10px 35px rgba(0,0,0,.28);
+  }
+  #title{
+    font-size:12px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:#e8f6ff;
+    margin-bottom:6px;
+  }
+  #info{
+    white-space:pre-line;
+    font-size:12px;
+    line-height:1.45;
+    color:#c9ddf4;
+  }
+  #controls{
+    margin-top:8px;
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  button{
+    border:1px solid rgba(160,210,255,.2);
+    background:rgba(10,18,30,.82);
+    color:#e8f6ff;
+    border-radius:10px;
+    padding:7px 10px;
+    cursor:pointer;
+    font-size:12px;
+  }
+  button:hover{ background:rgba(18,30,48,.92); }
+  #hint{
+    position:absolute; right:14px; bottom:14px; z-index:10;
+    background:rgba(4,10,18,.40);
+    border:1px solid rgba(140,190,255,.12);
+    border-radius:12px;
+    padding:8px 10px;
+    color:#c0d6ef;
+    font-size:11px;
+    line-height:1.45;
+    max-width:340px;
+  }
+  @media (max-width: 760px){
+    #hud{ min-width:auto; padding:8px 10px; }
+    #hint{ max-width:240px; font-size:10px; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="archive"></canvas>
+  <canvas id="main"></canvas>
+
+  <div id="hud">
+    <div id="title">Persistence Field v7</div>
+    <div id="info"></div>
+    <div id="controls">
+      <button id="resetBtn">Reset</button>
+      <button id="stressBtn">Stress</button>
+    </div>
+  </div>
+
+  <div id="hint">
+    Click = έντονο pulse διαταραχής<br>
+    Hold = ισχυρός attractor + ορατό πεδιακό ίχνος<br>
+    R = reset &nbsp; T = stress test
+  </div>
+</div>
+
+<script>
+(() => {
+  const main = document.getElementById('main');
+  const archive = document.getElementById('archive');
+  const ctx = main.getContext('2d');
+  const actx = archive.getContext('2d');
+  const info = document.getElementById('info');
+  const resetBtn = document.getElementById('resetBtn');
+  const stressBtn = document.getElementById('stressBtn');
+
+  let W = 0, H = 0, DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  let frame = 0;
+  let stressFrames = 0;
+  let seed = 0;
+
+  const isMobile = () => window.innerWidth < 760;
+
+  const cfg = {
+    desktopNodes: 32,
+    mobileNodes: 22,
+    baseEdgeRadius: 168,
+    clusterMin: 4,
+    maxSpeed: 1.6,
+    friction: 0.991,
+    pulseStrength: 8.5,        // πολύ ισχυρότερο click
+    attractStrength: 0.115,    // πολύ ισχυρότερο hold
+    dragWake: 0.085,           // το mouse αφήνει εμφανές ίχνος
+    contourThreshold: 4,
+    archiveEvery: 10,
+    influenceRadius: 260
+  };
+
+  let mouse = {
+    x: 0, y: 0, px: 0, py: 0,
+    down: false, hold: 0, speed: 0
+  };
+  let clickPulses = [];
+  let nodes = [];
+  let activeClusters = [];
+  let buildId = '';
+
+  function rand(a, b){ return a + Math.random() * (b - a); }
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t){ return a + (b - a) * t; }
+
+  function resize(){
+    W = window.innerWidth;
+    H = window.innerHeight;
+    DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+    for (const c of [main, archive]){
+      c.width = Math.floor(W * DPR);
+      c.height = Math.floor(H * DPR);
+      c.style.width = W + 'px';
+      c.style.height = H + 'px';
+    }
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    actx.setTransform(DPR,0,0,DPR,0,0);
+    drawBackground(actx, true);
+  }
+
+  function drawBackground(target, clearAll=false){
+    if(clearAll) target.clearRect(0,0,W,H);
+
+    const g = target.createRadialGradient(W*0.5, H*0.42, 0, W*0.5, H*0.42, Math.max(W,H)*0.72);
+    g.addColorStop(0.0, 'rgba(10,18,32,1)');
+    g.addColorStop(0.38, 'rgba(6,11,20,1)');
+    g.addColorStop(0.75, 'rgba(4,7,12,1)');
+    g.addColorStop(1.0, 'rgba(2,4,8,1)');
+    target.fillStyle = g;
+    target.fillRect(0,0,W,H);
+
+    for(let i=0;i<7;i++){
+      const x = W*(0.1 + i*0.13) + Math.sin(i*1.7 + seed)*30;
+      const y = H*(0.2 + (i%3)*0.22);
+      const rg = target.createRadialGradient(x, y, 0, x, y, Math.min(W,H)*0.25);
+      rg.addColorStop(0, 'rgba(60,110,200,0.055)');
+      rg.addColorStop(1, 'rgba(60,110,200,0.0)');
+      target.fillStyle = rg;
+      target.beginPath();
+      target.arc(x, y, Math.min(W,H)*0.25, 0, Math.PI*2);
+      target.fill();
+    }
+  }
+
+  function makeNode(i){
+    const z = rand(-1, 1);
+    const band = (i % 4) / 3;
+    return {
+      id: i,
+      x: rand(W*0.14, W*0.86),
+      y: rand(H*(0.16 + 0.08*band), H*(0.84 - 0.04*band)),
+      z,
+      vx: rand(-0.7, 0.7),
+      vy: rand(-0.55, 0.55),
+      energy: rand(0.4, 1.0),
+      radius: rand(1.0, 1.8),
+      life: 0,
+      phase: rand(0, Math.PI*2)
+    };
+  }
+
+  function reset(){
+    frame = 0;
+    stressFrames = 0;
+    seed = Math.floor(Math.random()*1e6);
+    buildId = 'PF-V7-' + seed.toString().slice(-5);
+    clickPulses = [];
+    activeClusters = [];
+    nodes = [];
+
+    const count = isMobile() ? cfg.mobileNodes : cfg.desktopNodes;
+    for(let i=0;i<count;i++) nodes.push(makeNode(i));
+
+    drawBackground(actx, true);
+  }
+
+  function dist3(a,b){
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const dz = (a.z - b.z) * 58;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz);
+  }
+
+  function applyMouseForces(n){
+    const dxm = mouse.x - n.x;
+    const dym = mouse.y - n.y;
+    const d = Math.sqrt(dxm*dxm + dym*dym) + 0.001;
+    const within = clamp(1 - d / cfg.influenceRadius, 0, 1);
+
+    // πάντα μια ελαφρά άμεση πεδιακή ανταπόκριση κοντά στον δείκτη
+    if(within > 0){
+      const wake = mouse.speed * cfg.dragWake * within;
+      n.vx += (dxm / d) * wake;
+      n.vy += (dym / d) * wake;
+    }
+
+    // ισχυρός hold attractor
+    if(mouse.down && within > 0){
+      const pull = cfg.attractStrength * (0.75 + mouse.hold*0.02) * within * within;
+      n.vx += (dxm / d) * pull * 3.6;
+      n.vy += (dym / d) * pull * 3.6;
+    }
+
+    // click pulses
+    for(let i=clickPulses.length-1;i>=0;i--){
+      const p = clickPulses[i];
+      const dx = n.x - p.x;
+      const dy = n.y - p.y;
+      const dd = Math.sqrt(dx*dx + dy*dy) + 0.001;
+      const wave = Math.exp(-(Math.abs(dd - p.ring))/68) * p.power;
+      n.vx += (dx/dd) * wave * 0.042;
+      n.vy += (dy/dd) * wave * 0.042;
+    }
+  }
+
+  function updateNodes(){
+    for(const n of nodes){
+      n.life++;
+      n.phase += 0.02 + n.energy*0.014;
+
+      const flowX = Math.sin((n.y*0.004) + n.phase*0.7 + seed*0.0005) * 0.010;
+      const flowY = Math.cos((n.x*0.0045) - n.phase*0.65 + seed*0.0003) * 0.010;
+
+      n.vx += flowX;
+      n.vy += flowY;
+
+      applyMouseForces(n);
+
+      if(stressFrames > 0){
+        n.vx += Math.sin(frame*0.09 + n.id*1.7) * 0.028;
+        n.vy += Math.cos(frame*0.085 + n.id*1.9) * 0.028;
+      }
+
+      const cx = W * 0.5;
+      const cy = H * 0.52;
+      n.vx += (cx - n.x) * 0.00008;
+      n.vy += (cy - n.y) * 0.00008;
+
+      n.vx *= cfg.friction;
+      n.vy *= cfg.friction;
+
+      const sp = Math.hypot(n.vx, n.vy);
+      if(sp > cfg.maxSpeed){
+        n.vx = n.vx / sp * cfg.maxSpeed;
+        n.vy = n.vy / sp * cfg.maxSpeed;
+      }
+
+      n.x += n.vx;
+      n.y += n.vy;
+
+      const margin = 28;
+      if(n.x < margin){ n.x = margin; n.vx *= -0.85; }
+      if(n.x > W-margin){ n.x = W-margin; n.vx *= -0.85; }
+      if(n.y < margin){ n.y = margin; n.vy *= -0.85; }
+      if(n.y > H-margin){ n.y = H-margin; n.vy *= -0.85; }
+    }
+
+    for(let i=clickPulses.length-1;i>=0;i--){
+      clickPulses[i].ring += 14;
+      clickPulses[i].power *= 0.978;
+      if(clickPulses[i].power < 0.28 || clickPulses[i].ring > Math.max(W,H)) clickPulses.splice(i,1);
+    }
+
+    if(stressFrames > 0) stressFrames--;
+    if(mouse.down) mouse.hold++; else mouse.hold = 0;
+  }
+
+  function adjacency(){
+    const list = Array.from({length:nodes.length}, () => []);
+    const R = cfg.baseEdgeRadius + (stressFrames > 0 ? 16 : 0);
+
+    for(let i=0;i<nodes.length;i++){
+      for(let j=i+1;j<nodes.length;j++){
+        const d = dist3(nodes[i], nodes[j]);
+        if(d < R){
+          list[i].push(j);
+          list[j].push(i);
+        }
+      }
+    }
+    return list;
+  }
+
+  function connectedComponents(adj){
+    const seen = new Array(nodes.length).fill(false);
+    const comps = [];
+    for(let i=0;i<nodes.length;i++){
+      if(seen[i]) continue;
+      const stack = [i];
+      const ids = [];
+      seen[i] = true;
+      while(stack.length){
+        const a = stack.pop();
+        ids.push(a);
+        for(const b of adj[a]){
+          if(!seen[b]){
+            seen[b] = true;
+            stack.push(b);
+          }
+        }
+      }
+      if(ids.length >= cfg.clusterMin) comps.push(ids);
+    }
+    return comps;
+  }
+
+  function clusterState(size){
+    if(size >= 8) return 'locked';
+    if(size >= 6) return 'metastable';
+    return 'candidate';
+  }
+
+  function centroid(ids){
+    let x=0, y=0, z=0;
+    for(const id of ids){ x += nodes[id].x; y += nodes[id].y; z += nodes[id].z; }
+    return { x:x/ids.length, y:y/ids.length, z:z/ids.length };
+  }
+
+  function smoothClosed(points, iterations=3){
+    let pts = points.slice();
+    for(let k=0;k<iterations;k++){
+      const out = [];
+      for(let i=0;i<pts.length;i++){
+        const p0 = pts[i];
+        const p1 = pts[(i+1)%pts.length];
+        const Q = { x: 0.75*p0.x + 0.25*p1.x, y: 0.75*p0.y + 0.25*p1.y };
+        const R = { x: 0.25*p0.x + 0.75*p1.x, y: 0.25*p0.y + 0.75*p1.y };
+        out.push(Q,R);
+      }
+      pts = out;
+    }
+    return pts;
+  }
+
+  function convexHull(pts){
+    if(pts.length < 3) return pts.slice();
+    const p = pts.slice().sort((a,b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+    const cross = (o,a,b) => (a.x-o.x)*(b.y-o.y) - (a.y-o.y)*(b.x-o.x);
+    const lower = [];
+    for(const pt of p){
+      while(lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], pt) <= 0) lower.pop();
+      lower.push(pt);
+    }
+    const upper = [];
+    for(let i=p.length-1;i>=0;i--){
+      const pt = p[i];
+      while(upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], pt) <= 0) upper.pop();
+      upper.push(pt);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+  }
+
+  function expandFromCentroid(points, c, factor){
+    return points.map(p => ({
+      x: c.x + (p.x - c.x) * factor,
+      y: c.y + (p.y - c.y) * factor
+    }));
+  }
+
+  function detectClusters(){
+    const adj = adjacency();
+    const comps = connectedComponents(adj);
+    activeClusters = comps.map(ids => {
+      const pts = ids.map(id => nodes[id]);
+      const c = centroid(ids);
+      const hull = convexHull(pts);
+      const expanded = expandFromCentroid(hull, c, 1.22);
+      const smooth = smoothClosed(expanded, 3);
+      const state = clusterState(ids.length);
+      return { ids, c, hull: smooth, state, size: ids.length };
+    });
+  }
+
+  function drawDepthField(){
+    ctx.clearRect(0,0,W,H);
+    ctx.drawImage(archive, 0, 0);
+
+    const vanX = W * 0.5;
+    const vanY = H * 0.18;
+    ctx.save();
+    ctx.lineWidth = 1;
+    for(let i=0;i<10;i++){
+      const x = (W/9)*i;
+      const g = ctx.createLinearGradient(x, H, vanX, vanY);
+      g.addColorStop(0, 'rgba(90,140,220,0.00)');
+      g.addColorStop(1, 'rgba(120,170,255,0.045)');
+      ctx.strokeStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(x, H+20);
+      ctx.lineTo(vanX, vanY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawMouseField(){
+    const r = cfg.influenceRadius * (mouse.down ? 0.92 : 0.72);
+    const strength = mouse.down ? 0.18 + Math.min(0.18, mouse.hold*0.006) : Math.min(0.13, mouse.speed*0.08);
+    if(strength <= 0.01) return;
+
+    const g = ctx.createRadialGradient(mouse.x, mouse.y, 0, mouse.x, mouse.y, r);
+    g.addColorStop(0, `rgba(160,230,255,${strength})`);
+    g.addColorStop(0.35, `rgba(90,170,255,${strength*0.45})`);
+    g.addColorStop(1, 'rgba(90,170,255,0)');
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, r, 0, Math.PI*2);
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, mouse.down ? 18 + mouse.hold*0.45 : 10 + mouse.speed*8, 0, Math.PI*2);
+    ctx.strokeStyle = `rgba(210,245,255,${Math.min(0.65, 0.22 + strength)})`;
+    ctx.lineWidth = mouse.down ? 1.8 : 1.0;
+    ctx.stroke();
+  }
+
+  function drawCluster(cluster){
+    const {hull, c, state, size} = cluster;
+    if(hull.length < 3) return;
+
+    let fillA = 0.06, strokeA = 0.26, glow = 10, width = 1.2;
+    if(state === 'candidate'){ fillA = 0.07; strokeA = 0.30; glow = 12; width = 1.25; }
+    if(state === 'metastable'){ fillA = 0.11; strokeA = 0.52; glow = 18; width = 1.7; }
+    if(state === 'locked'){ fillA = 0.17; strokeA = 0.88; glow = 28; width = 2.2; }
+
+    const grad = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, Math.max(80, size*18));
+    grad.addColorStop(0.00, `rgba(145, 220, 255, ${fillA*1.9})`);
+    grad.addColorStop(0.45, `rgba(78, 170, 255, ${fillA})`);
+    grad.addColorStop(1.00, `rgba(40, 90, 170, 0.00)`);
+
+    ctx.save();
+    ctx.shadowBlur = glow;
+    ctx.shadowColor = state === 'locked' ? 'rgba(120,220,255,0.55)' : 'rgba(90,170,255,0.28)';
+
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for(let i=1;i<hull.length;i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    const edge = ctx.createLinearGradient(c.x-80, c.y-80, c.x+90, c.y+90);
+    edge.addColorStop(0, `rgba(220,245,255,${strokeA})`);
+    edge.addColorStop(.55, `rgba(120,205,255,${strokeA*0.85})`);
+    edge.addColorStop(1, `rgba(60,120,255,${strokeA*0.75})`);
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = width;
+    ctx.stroke();
+
+    if(state !== 'candidate'){
+      for(let k=1;k<=2;k++){
+        const inner = hull.map(p => ({
+          x: lerp(c.x, p.x, 1 - k*0.16),
+          y: lerp(c.y, p.y, 1 - k*0.16)
+        }));
+        ctx.beginPath();
+        ctx.moveTo(inner[0].x, inner[0].y);
+        for(let i=1;i<inner.length;i++) ctx.lineTo(inner[i].x, inner[i].y);
+        ctx.closePath();
+        ctx.strokeStyle = `rgba(190,230,255,${state === 'locked' ? 0.16/k : 0.08/k})`;
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+
+    if(state === 'locked' && frame % cfg.archiveEvery === 0){
+      actx.save();
+      actx.shadowBlur = 18;
+      actx.shadowColor = 'rgba(90,190,255,0.22)';
+      actx.beginPath();
+      actx.moveTo(hull[0].x, hull[0].y);
+      for(let i=1;i<hull.length;i++) actx.lineTo(hull[i].x, hull[i].y);
+      actx.closePath();
+      actx.strokeStyle = 'rgba(100,185,255,0.10)';
+      actx.lineWidth = 1.1;
+      actx.stroke();
+      actx.restore();
+    }
+  }
+
+  function drawEdgesLight(){
+    ctx.save();
+    ctx.lineWidth = 0.6;
+    const adj = adjacency();
+    let drawn = 0;
+    for(let i=0;i<nodes.length;i++){
+      for(const j of adj[i]){
+        if(j <= i) continue;
+        const a = nodes[i], b = nodes[j];
+        const alpha = 0.025;
+        ctx.strokeStyle = `rgba(150,200,255,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        drawn++;
+        if(drawn > 180) break;
+      }
+      if(drawn > 180) break;
+    }
+    ctx.restore();
+  }
+
+  function drawNodesSubordinate(){
+    for(const n of nodes){
+      const depth = (n.z + 1) * 0.5;
+      const r = n.radius + depth * 0.35 + Math.sin(n.phase)*0.08;
+      const a = 0.20 + depth * 0.10;
+
+      const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r*5.5);
+      g.addColorStop(0, `rgba(235,245,255,${a})`);
+      g.addColorStop(0.4, `rgba(145,190,255,${a*0.30})`);
+      g.addColorStop(1, `rgba(145,190,255,0)`);
+
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r*5.5, 0, Math.PI*2);
+      ctx.fillStyle = g;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(235,245,255,${a*0.56})`;
+      ctx.fill();
+    }
+  }
+
+  function drawPulses(){
+    for(const p of clickPulses){
+      const g = ctx.createRadialGradient(p.x, p.y, p.ring*0.18, p.x, p.y, p.ring);
+      g.addColorStop(0, 'rgba(120,210,255,0)');
+      g.addColorStop(0.68, `rgba(120,210,255,${0.09 * p.power})`);
+      g.addColorStop(1, 'rgba(120,210,255,0)');
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.ring, 0, Math.PI*2);
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 2.4;
+      ctx.stroke();
+    }
+  }
+
+  function render(){
+    drawDepthField();
+    drawEdgesLight();
+    drawMouseField();
+
+    activeClusters.sort((a,b) => a.size - b.size);
+    for(const c of activeClusters) drawCluster(c);
+
+    drawNodesSubordinate();
+    drawPulses();
+
+    const locked = activeClusters.filter(c => c.state === 'locked').length;
+    const meta = activeClusters.filter(c => c.state === 'metastable').length;
+
+    info.textContent =
+      `Build: ${buildId}\n` +
+      `Frame: ${frame}\n` +
+      `Nodes: ${nodes.length}\n` +
+      `Clusters: ${activeClusters.length}\n` +
+      `Metastable: ${meta}\n` +
+      `Locked: ${locked}\n` +
+      `Status: ${stressFrames > 0 ? 'stress active' : 'live field'}`;
+  }
+
+  function loop(){
+    frame++;
+    updateNodes();
+    detectClusters();
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('resize', resize);
+
+  window.addEventListener('mousemove', e => {
+    mouse.px = mouse.x;
+    mouse.py = mouse.y;
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    mouse.speed = Math.min(2.2, Math.hypot(mouse.x - mouse.px, mouse.y - mouse.py) / 10);
+  });
+
+  window.addEventListener('mousedown', e => {
+    mouse.down = true;
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+  });
+
+  window.addEventListener('mouseup', () => {
+    mouse.down = false;
+  });
+
+  window.addEventListener('click', e => {
+    clickPulses.push({
+      x: e.clientX,
+      y: e.clientY,
+      ring: 10,
+      power: cfg.pulseStrength
+    });
+  });
+
+  window.addEventListener('keydown', e => {
+    if(e.key === 'r' || e.key === 'R') reset();
+    if(e.key === 't' || e.key === 'T') stressFrames = 380;
+  });
+
+  resetBtn.addEventListener('click', reset);
+  stressBtn.addEventListener('click', () => { stressFrames = 380; });
+
+  resize();
+  reset();
+  loop();
+})();
+</script>
+</body>
+</html>
